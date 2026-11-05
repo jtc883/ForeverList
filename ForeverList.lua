@@ -34,6 +34,8 @@ local editScroll, editBox, editHint
 local rows = {}
 local refreshPending = false
 local nameRetries = 0
+local bankOpen = false     -- bank tabs can only be read while the bank is open
+local bankUnnamed = 0      -- bank stacks whose names were still loading at the last scan
 local Refresh              -- forward declaration; defined in the Display section
 
 ------------------------------------------------------------
@@ -105,13 +107,19 @@ local function ItemName(info)
     end
 end
 
--- This character's bags -> { [lowercase name] = total }, number of stacks with no name yet.
--- Only the equipped bags are walked, so nothing in the character, guild or Warband banks is
--- ever counted.
-local function CountBags()
-    local counts, unnamed = {}, 0
-    for bag = 0, NUM_TOTAL_EQUIPPED_BAG_SLOTS or NUM_BAG_SLOTS do
-        for slot = 1, C_Container.GetContainerNumSlots(bag) do
+-- The equipped bags (backpack, bags, reagent bag) and this character's own bank tabs. The
+-- Warband bank (AccountBankTab_*) and the guild bank are never read.
+local BAGS, BANK_TABS = {}, {}
+for bag = 0, NUM_TOTAL_EQUIPPED_BAG_SLOTS or NUM_BAG_SLOTS do BAGS[#BAGS + 1] = bag end
+for tab = 1, 9 do BANK_TABS[#BANK_TABS + 1] = Enum.BagIndex["CharacterBankTab_" .. tab] end
+
+-- Containers -> { [lowercase name] = total }, stacks with no name yet, total slots seen.
+local function CountContainers(bags)
+    local counts, unnamed, slots = {}, 0, 0
+    for _, bag in ipairs(bags) do
+        local size = C_Container.GetContainerNumSlots(bag)
+        slots = slots + size
+        for slot = 1, size do
             local info = C_Container.GetContainerItemInfo(bag, slot)
             if info then
                 local name = ItemName(info)
@@ -124,7 +132,21 @@ local function CountBags()
             end
         end
     end
-    return counts, unnamed
+    return counts, unnamed, slots
+end
+
+local function CountBags()
+    return CountContainers(BAGS)
+end
+
+-- While the bank is open, save what this character has in it. It can only change while
+-- open, so the saved copy stays right after leaving. charDb.bank is nil until the first visit.
+local function ScanBank()
+    if not bankOpen then return end
+    local counts, unnamed, slots = CountContainers(BANK_TABS)
+    if slots == 0 then return end -- tabs not readable yet: keep the last copy
+    charDb.bank = counts
+    bankUnnamed = unnamed
 end
 
 ------------------------------------------------------------
@@ -160,6 +182,7 @@ local function RequestRefresh(delay)
     refreshPending = true
     C_Timer.After(delay or REFRESH_DELAY, function()
         refreshPending = false
+        ScanBank()
         Refresh()
     end)
 end
@@ -169,9 +192,12 @@ function Refresh()
 
     local items = ParseList(charDb.text)
     local counts, unnamed = CountBags()
+    local bank = charDb.bank or {}
+    unnamed = unnamed + bankUnnamed
     for order, item in ipairs(items) do
+        local key = item.name:lower()
         item.order = order
-        item.have = counts[item.name:lower()] or 0
+        item.have = (counts[key] or 0) + (bank[key] or 0)
         item.done = item.have >= item.need
         item.progress = item.need > 0 and item.have / item.need or 1
     end
@@ -391,6 +417,11 @@ end
 ------------------------------------------------------------
 -- Events
 ------------------------------------------------------------
+-- newer clients open the bank through PLAYER_INTERACTION_MANAGER_FRAME_SHOW as well
+local function IsBanker(interactionType)
+    return Enum.PlayerInteractionType ~= nil and interactionType == Enum.PlayerInteractionType.Banker
+end
+
 local events = CreateFrame("Frame")
 events:RegisterEvent("ADDON_LOADED")
 events:SetScript("OnEvent", function(self, event, arg1)
@@ -420,7 +451,19 @@ events:SetScript("OnEvent", function(self, event, arg1)
 
         self:RegisterEvent("BAG_UPDATE_DELAYED")
         self:RegisterEvent("PLAYER_ENTERING_WORLD") -- bags may not be readable until now
-    else -- bags changed, or the world finished loading
+        -- RegisterEvent throws on unknown events, so be defensive
+        for _, name in ipairs({ "BANKFRAME_OPENED", "BANKFRAME_CLOSED", "PLAYER_INTERACTION_MANAGER_FRAME_SHOW", "PLAYER_INTERACTION_MANAGER_FRAME_HIDE", "PLAYERBANKSLOTS_CHANGED", "BANK_TABS_CHANGED" }) do
+            pcall(self.RegisterEvent, self, name)
+        end
+    elseif event == "BANKFRAME_OPENED" or (event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" and IsBanker(arg1)) then
+        bankOpen = true
+        RequestRefresh()
+    elseif event == "BANKFRAME_CLOSED" or (event == "PLAYER_INTERACTION_MANAGER_FRAME_HIDE" and IsBanker(arg1)) then
+        bankOpen = false
+        bankUnnamed = 0
+    elseif event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" or event == "PLAYER_INTERACTION_MANAGER_FRAME_HIDE" then
+        -- some other window (vendor, mailbox, ...): nothing to do
+    else -- bags or bank changed, or the world finished loading
         RequestRefresh()
     end
 end)
@@ -430,7 +473,7 @@ end)
 --   /fl, /flist or /foreverlist : show/hide the window
 --   /flist edit            : open the window on the paste box
 --   /flist reset           : restore the default position and size (keeps the list)
---   /flist debug           : print what the addon reads from the bags, to diagnose wrong counts
+--   /flist debug           : print what the addon reads from the bags and bank, to diagnose wrong counts
 ------------------------------------------------------------
 SLASH_FOREVERLIST1 = "/flist"
 SLASH_FOREVERLIST2 = "/foreverlist"
@@ -453,21 +496,32 @@ SlashCmdList.FOREVERLIST = function(input)
         db.width, db.height = DEFAULTS.width, DEFAULTS.height
         ApplyLayout()
         print("|cffffd700Forever List:|r position and size reset.")
-    -- /flist debug : every name read from the bags, then how each listed item matched
+    -- /flist debug : every name read from the bags and the saved bank, then how each listed item matched
     elseif cmd == "debug" then
         local counts, unnamed = CountBags()
+        local bank = charDb.bank or {}
         local names = {}
         for key, total in pairs(counts) do names[#names + 1] = key .. " = " .. total end
         table.sort(names)
         print("|cffffd700Forever List:|r in bags (" .. unnamed .. " stacks with no name yet):")
         for _, line in ipairs(names) do print("  " .. line) end
+        names = {}
+        for key, total in pairs(bank) do names[#names + 1] = key .. " = " .. total end
+        table.sort(names)
+        if charDb.bank then
+            print("|cffffd700Forever List:|r in bank (as of your last visit" .. (bankOpen and ", open now" or "") .. "):")
+            for _, line in ipairs(names) do print("  " .. line) end
+        else
+            print("|cffffd700Forever List:|r bank: not seen yet on this character. Open your bank once to count it.")
+        end
         print("|cffffd700Forever List:|r your list:")
         for _, item in ipairs(ParseList(charDb.text)) do
             local shown
             for _, row in ipairs(rows) do
                 if row:IsShown() and row.key == item.name:lower() then shown = row.text:GetText() end
             end
-            print("  [" .. item.name .. "] have " .. (counts[item.name:lower()] or 0) .. ", need " .. item.need
+            local key = item.name:lower()
+            print("  [" .. item.name .. "] bags " .. (counts[key] or 0) .. " + bank " .. (bank[key] or 0) .. ", need " .. item.need
                 .. ", box shows: " .. (shown or "nothing"))
         end
     -- anything else: show the list of commands
