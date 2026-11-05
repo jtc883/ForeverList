@@ -169,12 +169,24 @@ function Refresh()
 
     local items = ParseList(charDb.text)
     local counts, unnamed = CountBags()
-    for index, item in ipairs(items) do
-        local have = counts[item.name:lower()] or 0
-        local color = have >= item.need and COLOR_DONE or COLOR_MISSING
+    for order, item in ipairs(items) do
+        item.order = order
+        item.have = counts[item.name:lower()] or 0
+        item.done = item.have >= item.need
+        item.progress = item.need > 0 and item.have / item.need or 1
+    end
+    -- closest to its goal first; finished items drop to the bottom; ties keep the pasted order
+    table.sort(items, function(a, b)
+        if a.done ~= b.done then return not a.done end
+        if not a.done and a.progress ~= b.progress then return a.progress > b.progress end
+        return a.order < b.order
+    end)
 
+    for index, item in ipairs(items) do
+        local color = item.done and COLOR_DONE or COLOR_MISSING
         local row = GetRow(index)
-        row.text:SetText(color .. item.name .. " " .. have .. "/" .. item.need .. "|r")
+        row.key = item.name:lower()
+        row.text:SetText(color .. item.name .. " " .. item.have .. "/" .. item.need .. "|r")
         row:Show()
     end
     for index = #items + 1, #rows do
@@ -450,8 +462,11 @@ SlashCmdList.FOREVERLIST = function(input)
         print("|cffffd700Forever List:|r in bags (" .. unnamed .. " stacks with no name yet):")
         for _, line in ipairs(names) do print("  " .. line) end
         print("|cffffd700Forever List:|r your list:")
-        for index, item in ipairs(ParseList(charDb.text)) do
-            local shown = rows[index] and rows[index]:IsShown() and rows[index].text:GetText()
+        for _, item in ipairs(ParseList(charDb.text)) do
+            local shown
+            for _, row in ipairs(rows) do
+                if row:IsShown() and row.key == item.name:lower() then shown = row.text:GetText() end
+            end
             print("  [" .. item.name .. "] have " .. (counts[item.name:lower()] or 0) .. ", need " .. item.need
                 .. ", box shows: " .. (shown or "nothing"))
         end

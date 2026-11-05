@@ -2,7 +2,7 @@
 ## Title: Forever List
 ## Notes: Paste in a plain list of items and see how many you have in your bags against how many you need.
 ## Author: Edgecrusher883
-## Version: 1.0.9
+## Version: 1.1.0
 ## SavedVariables: ForeverListDB
 ## SavedVariablesPerCharacter: ForeverListCharDB
 
