@@ -469,6 +469,73 @@ events:SetScript("OnEvent", function(self, event, arg1)
 end)
 
 ------------------------------------------------------------
+-- Public API, for other addons (such as ForeverProfGuide) to send items in
+--   ForeverListAPI.AddItems(items, replace) -> added, updated
+--     items   : { { name = "Linen Cloth", count = 60 }, ... }  (count = how many you need)
+--     Items already on the list get the new count, new items are appended, and every other
+--     line is left as it was. replace = true clears the list first.
+--   ForeverListAPI.Show() : open the window
+------------------------------------------------------------
+ForeverListAPI = {}
+
+function ForeverListAPI.AddItems(items, replace)
+    if not charDb then return 0, 0 end -- called before ADDON_LOADED
+
+    -- incoming items by lowercase name; a name sent twice gets its counts added together
+    local incoming, order = {}, {}
+    for _, item in ipairs(items or {}) do
+        local name = type(item.name) == "string" and Trim(item.name) or ""
+        local count = math.floor((tonumber(item.count) or 0) + 0.5)
+        if name ~= "" and count > 0 then
+            local key = name:lower()
+            if incoming[key] then
+                incoming[key].count = incoming[key].count + count
+            else
+                incoming[key] = { name = name, count = count }
+                order[#order + 1] = key
+            end
+        end
+    end
+
+    local lines, seen, added, updated = {}, {}, 0, 0
+    if not replace then
+        for line in charDb.text:gmatch("[^\r\n]+") do
+            local name = ParseLine(line)
+            local key = name and name:lower()
+            if key and incoming[key] then
+                if not seen[key] then -- later copies of the same item are dropped
+                    seen[key] = true
+                    updated = updated + 1
+                    lines[#lines + 1] = incoming[key].count .. " " .. incoming[key].name
+                end
+            else
+                lines[#lines + 1] = line
+            end
+        end
+    end
+    for _, key in ipairs(order) do
+        if not seen[key] then
+            added = added + 1
+            lines[#lines + 1] = incoming[key].count .. " " .. incoming[key].name
+        end
+    end
+
+    charDb.text = table.concat(lines, "\n")
+    if editScroll:IsShown() then
+        ShowListView() -- an unsaved paste would overwrite what was just sent
+    else
+        Refresh()
+    end
+    return added, updated
+end
+
+function ForeverListAPI.Show()
+    if not frame then return end
+    frame:Show()
+    charDb.shown = true
+end
+
+------------------------------------------------------------
 -- Slash commands
 --   /fl, /flist or /foreverlist : show/hide the window
 --   /flist edit            : open the window on the paste box
